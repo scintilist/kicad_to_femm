@@ -116,16 +116,16 @@ class Window(pyglet.window.Window):
 
         # Help label
         help_doc = pyglet.text.decode_text(
-            'Keyboard commands:\n'
-            '\tESC, Q \t- Close viewer.\n'
-            '\tHOME  \t- Center and set default zoom.\n'
-            '\tF         \t- Toggle polygon fill.\n'
-            '\tL         \t- Toggle polygon lines.\n'
-            '\tP         \t- Toggle polygon points.\n'
-            '\tH, ?, F1\t- Toggle help overlay.\n'
+            'Keyboard Commands\n'
+            '\tESC, Q \t close\n'
+            '\tHOME  \t center and set default zoom\n'
+            '\tF         \t toggle fill\n'
+            '\tL         \t toggle lines\n'
+            '\tP         \t toggle points\n'
+            '\tH, ?, F1\t toggle help\n'
             '\n'
-            'Zoom with mouse scroll or + and - keys.\n'
-            'Pan with middle mouse drag or arrow keys.'
+            'Zoom with mouse scroll or + and - keys\n'
+            'Pan with middle mouse drag or arrow keys'
         )
         help_doc.set_style(0, len(help_doc.text), dict(font_size=14, color=(0, 0, 0, 160)))
 
