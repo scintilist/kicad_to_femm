@@ -51,7 +51,7 @@ class PadBase:
         # SMD pad conductor size ratio
         # For example, a 2mm x 1mm pad with a ratio of 0.8 will be converted to a 1.6mm x 0.8mm pad
         # Values that give a reasonable real-world approximation would generally be between 0.5 - 0.8
-        self.smd_pad_size = PadBase.DEFAULT_SMD_PAD_SIZE
+        self._smd_pad_size = PadBase.DEFAULT_SMD_PAD_SIZE
 
         self.kicad_item = kicad_item
 
@@ -67,6 +67,16 @@ class PadBase:
 
         # Set of blocks the pad is a part of
         self.blocks = set()
+
+    @property
+    def smd_pad_size(self):
+        return self._smd_pad_size
+
+    @smd_pad_size.setter
+    def smd_pad_size(self, value):
+        if not (0.0 < value < 1.0):
+            raise ValueError('smd_pad_size must be > 0.0 and < 1.0')
+        self._smd_pad_size = value
 
     @property
     def center(self):
@@ -126,59 +136,29 @@ class PadBase:
                 else:
                     raise ValueError('Unknown pad drill shape <{}>.'.format(self.kicad_item.drill.shape))
 
+                # Rotate pad drill to it's final orientation
+                self._conductor_polygon = rotate(pad_poly, -self.kicad_item.at.rot, self.center).simplify(0.01)
+
             elif self.kicad_item.type == 'smd':
-                size_x = self.kicad_item.size.x * self.smd_pad_size
-                size_y = self.kicad_item.size.y * self.smd_pad_size
+                # Start with the copper polygon.
+                initial_area = self.copper_polygon.area
+                goal_area = self.smd_pad_size * initial_area
+                area_to_remove = initial_area - goal_area
+                initial_perimeter = self.copper_polygon.length
 
-                if self.kicad_item.shape == 'circle':
-                    pad_poly = self.center.buffer(size_x / 2)
+                # First estimate of the margin needed
+                margin = -area_to_remove / initial_perimeter
 
-                elif self.kicad_item.shape == 'oval':
-                    radius = min(size_x, size_y) / 2
-                    pad_line = LineString(((self.center.x + radius - size_x / 2, self.center.y + radius - size_y / 2),
-                                           (self.center.x + size_x / 2 - radius, self.center.y + size_y / 2 - radius)))
-                    pad_poly = pad_line.buffer(radius)
-
-                elif self.kicad_item.shape == 'rect':
-                    pad_poly = box(self.center.x - size_x / 2, self.center.y - size_y / 2,
-                                   self.center.x + size_x / 2, self.center.y + size_y / 2)
-
-                elif self.kicad_item.shape == 'trapezoid':
-                    # Construct the copper polygon first
-                    size_x = self.kicad_item.size.x
-                    size_y = self.kicad_item.size.y
-                    d = self.kicad_item.rect_delta
-                    base_poly = Polygon((((-size_x - d.y) / 2, (size_y + d.x) / 2),
-                                        ((size_x + d.y) / 2, (size_y - d.x) / 2),
-                                        ((size_x - d.y) / 2, (-size_y + d.x) / 2),
-                                        ((-size_x + d.y) / 2, (-size_y - d.x) / 2)))
-
-                    # Intersect 4 shifted copies of the polygon to get the conductor boundary
-                    x_shift = size_x * (1 - self.smd_pad_size) / 2
-                    y_shift = size_y * (1 - self.smd_pad_size) / 2
-                    for shift in ((-x_shift, 0), (x_shift, 0), (0, -y_shift), (0, y_shift)):
-                        try:
-                            pad_poly = pad_poly.intersection(translate(base_poly, shift[0], shift[1]))
-                        except NameError:
-                            pad_poly = translate(base_poly, shift[0], shift[1])
-
-                    pad_poly = translate(pad_poly, self.center.x, self.center.y)
-
-                else:
-                    raise ValueError('Unknown pad shape <{}>.'.format(self.kicad_item.shape))
-
-                # Apply Pad offset if it exists
-                try:
-                    offset = self.kicad_item.drill.offset
-                    pad_poly = translate(pad_poly, offset.x, offset.y)
-                except (AttributeError, IndexError):
-                    pass
+                # Iteratively reduce area error until 10 iterations have passed, or error is <1%
+                for i in range(10):
+                    self._conductor_polygon = self.copper_polygon.buffer(margin)
+                    error = area_to_remove / (initial_area - self._conductor_polygon.area)
+                    if abs(1 - error) < 0.01:
+                        break
+                    margin *= error
 
             else:
                 raise ValueError('Unknown pad type <{}>'.format(self.kicad_item.type))
-
-            # Rotate pad to it's final orientation
-            self._conductor_polygon = rotate(pad_poly, -self.kicad_item.at.rot, self.center).simplify(0.01)
 
         return self._conductor_polygon
 
