@@ -45,6 +45,8 @@ if __name__ == '__main__':
                         help='via copper thickness in um, default is 17um')
     parser.add_argument('-l', '--layers', nargs='*', default=['F.Cu', 'B.Cu'],
                         help='layers to model (supports up to 2), defaults to \'F.Cu\' and \'B.Cu\'')
+    parser.add_argument('-s', '--show', action='store_true',
+                        help='show the generated polygons')
 
     args = parser.parse_args()
 
@@ -68,7 +70,7 @@ if __name__ == '__main__':
     kicad_pcb = KiCadPcb()
     item = kicad_pcb
     with open(args.in_file, 'r') as f:
-        print("Opening input file '{}'...".format(args.in_file))
+        print("Opened input file '{}'...".format(args.in_file))
 
         # Read until the opening paren which creates the root item
         try:
@@ -108,8 +110,9 @@ if __name__ == '__main__':
     converter.write_out(fec_file)
 
     # Write the output FEC file
-    print("Writing output file '{}'...".format(args.out_file))
     fec_file.write_out()
+    print("Wrote output file '{}'...".format(args.out_file))
 
-    # Try to show the generated output polygons
-    converter.show()
+    # Show the generated output polygons
+    if args.show:
+        converter.show()
