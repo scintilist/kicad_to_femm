@@ -15,6 +15,7 @@ from shapely.affinity import rotate, translate
 from kicad_to_femm import viewer
 import kicad_to_femm.fec_file as fec
 from kicad_to_femm.layout import Layout
+from kicad_to_femm.spinner import spinner
 
 
 def distance(p1, p2):
@@ -44,12 +45,14 @@ def calc_mesh_size(p1, p2, p3, p4):
 
 
 class PadBase:
-    # SMD pad conductor size ratio
-    # For example, a 2mm x 1mm pad with a ratio of 0.8 will be converted to a 1.6mm x 0.8mm pad
-    # Values that give a reasonable real-world approximation would generally be between 0.5 - 0.8
-    SMD_CONDUCTOR_SIZE_RATIO = 0.6
+    DEFAULT_SMD_PAD_SIZE = 0.6
 
     def __init__(self, kicad_item):
+        # SMD pad conductor size ratio
+        # For example, a 2mm x 1mm pad with a ratio of 0.8 will be converted to a 1.6mm x 0.8mm pad
+        # Values that give a reasonable real-world approximation would generally be between 0.5 - 0.8
+        self.smd_pad_size = PadBase.DEFAULT_SMD_PAD_SIZE
+
         self.kicad_item = kicad_item
 
         # Fill in missing values if the source item is a via type
@@ -124,8 +127,8 @@ class PadBase:
                     raise ValueError('Unknown pad drill shape <{}>.'.format(self.kicad_item.drill.shape))
 
             elif self.kicad_item.type == 'smd':
-                size_x = self.kicad_item.size.x * PadBase.SMD_CONDUCTOR_SIZE_RATIO
-                size_y = self.kicad_item.size.y * PadBase.SMD_CONDUCTOR_SIZE_RATIO
+                size_x = self.kicad_item.size.x * self.smd_pad_size
+                size_y = self.kicad_item.size.y * self.smd_pad_size
 
                 if self.kicad_item.shape == 'circle':
                     pad_poly = self.center.buffer(size_x / 2)
@@ -151,8 +154,8 @@ class PadBase:
                                         ((-size_x + d.y) / 2, (-size_y - d.x) / 2)))
 
                     # Intersect 4 shifted copies of the polygon to get the conductor boundary
-                    x_shift = size_x * (1 - PadBase.SMD_CONDUCTOR_SIZE_RATIO) / 2
-                    y_shift = size_y * (1 - PadBase.SMD_CONDUCTOR_SIZE_RATIO) / 2
+                    x_shift = size_x * (1 - self.smd_pad_size) / 2
+                    y_shift = size_y * (1 - self.smd_pad_size) / 2
                     for shift in ((-x_shift, 0), (x_shift, 0), (0, -y_shift), (0, y_shift)):
                         try:
                             pad_poly = pad_poly.intersection(translate(base_poly, shift[0], shift[1]))
@@ -175,7 +178,7 @@ class PadBase:
                 raise ValueError('Unknown pad type <{}>'.format(self.kicad_item.type))
 
             # Rotate pad to it's final orientation
-            self._conductor_polygon =  rotate(pad_poly, -self.kicad_item.at.rot, self.center).simplify(0.01)
+            self._conductor_polygon = rotate(pad_poly, -self.kicad_item.at.rot, self.center).simplify(0.01)
 
         return self._conductor_polygon
 
@@ -449,6 +452,7 @@ class Converter:
 
         window.show()
 
+    @spinner('Writing FEC output... ')
     def write_out(self, fec_file):
         # Set up the layout
         layer_bounds = []
@@ -492,21 +496,27 @@ class Converter:
         # Also removes any vias in the pruned blocks.
         self.prune_blocks()
 
+    @spinner('Finding pads... ')
     def find_pads(self, kicad_pcb):
         """ Find all pads matching the net, within the bounds (including vias). """
-        for kicad_pad in chain(*(module.pads for module in kicad_pcb.modules), kicad_pcb.vias):
+        pads_and_vias = chain(*(module.pads for module in kicad_pcb.modules), kicad_pcb.vias)
+        for kicad_pad in pads_and_vias:
             if any(kicad_pad.has_layer(layer) for layer in self.layers):
                 new_pad = Pad(kicad_pad)
                 if (not self.bounds) or self.bounds.contains(new_pad.center):
                     self.pads.append(new_pad)
 
+    @spinner('Assigning conductors... ')
     def assign_conductors(self):
         """ Assign conductors to pads based on the conductor specs. """
         for pad in self.pads:
             for conductor_spec in self.conductor_specs:
                 if conductor_spec.match(pad):
                     pad.conductor = conductor_spec.conductor
+                    if conductor_spec.smd_pad_size:
+                        pad.smd_pad_size = conductor_spec.smd_pad_size
 
+    @spinner('Finding vias... ')
     def find_vias(self):
         """ Convert through-hole pads without a conductor to vias. """
         remaining_pads = []
@@ -517,6 +527,7 @@ class Converter:
                 remaining_pads.append(pad)
         self.pads = remaining_pads
 
+    @spinner('Finding blocks... ')
     def find_blocks(self, kicad_pcb):
         """ Find all blocks (blocks are made of the union of zones, segments, vias, and pads)
             Cut to the bounds if given.
@@ -554,6 +565,7 @@ class Converter:
             except TypeError:
                 self.blocks.append(Block(polygons, layer))
 
+    @spinner('Removing unconnected pads... ')
     def remove_unconnected_pads(self):
         # Remove pads that have no conductors assigned to them
         remaining_pads = []
@@ -562,6 +574,7 @@ class Converter:
                 remaining_pads.append(pad)
         self.pads = remaining_pads
 
+    @spinner('Pruning blocks... ')
     def prune_blocks(self):
         """ Use vias to connect all blocks, starting from conductors (pads).
             Remove any blocks that do not connect back to a conductor (pad).
@@ -605,8 +618,9 @@ class ConductorSpec:
     """ Conductor Spec, can be assigned to one or more pads. """
     def __init__(self, spec):
         self.net_name = ''
-        self.module_specs = []
-        self.region_specs = []
+        self.smd_pad_size = None
+        self.modules = []
+        self.regions = []
 
         name = ''
         value_str = '0V'
@@ -617,10 +631,12 @@ class ConductorSpec:
                 value_str = item
             elif field == 'net':
                 self.net_name = item
+            elif field == 'smd_pad_size':
+                self.smd_pad_size = item
             elif field == 'modules':
-                self.module_specs = item
+                self.modules = item
             elif field == 'regions':
-                self.region_specs = item
+                self.regions = item
 
         # Parse the value
         value = float(value_str[:-1])
@@ -642,13 +658,13 @@ class ConductorSpec:
             return False
 
         # Check against the regions
-        for region_spec in self.region_specs:
+        for region_spec in self.regions:
             if box(*region_spec).contains(pad.center):
                 return True
 
         # Check against the modules
         try:
-            for module_spec in self.module_specs:
+            for module_spec in self.modules:
                 if pad.kicad_item.parent.reference == module_spec[0]:
                     # If the module spec length is 1, then there are no pads named and all are allowed
                     if len(module_spec) == 1 or pad.kicad_item.number in module_spec[1:]:
