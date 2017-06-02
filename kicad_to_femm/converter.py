@@ -622,13 +622,13 @@ class Converter:
 
     @spinner('Merging overlapping SMD pads... ')
     def merge_overlapping_pads(self):
-        self.pads = []
+        all_pads = set()
         for block in self.blocks:
             # Separate block SMD pads and through hole pads
-            all_pads = block.pads
+            all_block_pads = block.pads
             block.pads = set()
             smd_pads = []
-            for pad in all_pads:
+            for pad in all_block_pads:
                 if pad.kicad_item.type == 'smd':
                     smd_pads.append(pad)
                 else:
@@ -658,7 +658,8 @@ class Converter:
             block.pads |= set(processed_smd_pads)
 
             # Copy the block pads to the global pads list
-            self.pads.extend(block.pads)
+            all_pads |= block.pads
+        self.pads = list(all_pads)
 
 
 class ConductorSpec:
