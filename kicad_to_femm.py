@@ -7,7 +7,7 @@ from ast import literal_eval
 import argparse
 from textwrap import dedent
 import glob
-from os.path import splitext
+from os.path import split, splitext, abspath
 
 from kicad_to_femm.kicad_pcb import KiCadPcb
 from kicad_to_femm.converter import Converter, ConductorSpec
@@ -59,7 +59,7 @@ if __name__ == '__main__':
 
     # Set the default output file if not given
     if not args.out_file:
-        args.out_file = splitext(args.in_file)[0] + '.FEC'
+        args.out_file = splitext(split(args.in_file)[1])[0] + '.FEC'
 
     # Limit to 2 layers
     if len(args.layers) > 2:
@@ -70,7 +70,7 @@ if __name__ == '__main__':
     kicad_pcb = KiCadPcb()
     item = kicad_pcb
     with open(args.in_file, 'r') as f:
-        print("Opened input file '{}'...".format(args.in_file))
+        print("Opened input file '{}'.".format(abspath(args.in_file)))
 
         # Read until the opening paren which creates the root item
         try:
@@ -111,7 +111,7 @@ if __name__ == '__main__':
 
     # Write the output FEC file
     fec_file.write_out()
-    print("Wrote output file '{}'...".format(args.out_file))
+    print("Wrote output file '{}'.".format(abspath(args.out_file)))
 
     # Show the generated output polygons
     if args.show:
