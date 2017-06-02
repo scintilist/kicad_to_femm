@@ -1,7 +1,7 @@
 """
 Simple progress spinner running on a separate thread.
 """
-import time
+from time import sleep, perf_counter
 import threading
 from itertools import cycle
 
@@ -12,8 +12,11 @@ def spinner(text):
         def wrapper(*args, **kwargs):
             print(text)
             start()
+            start_time = perf_counter()
             function(*args, **kwargs)
+            stop_time = perf_counter()
             stop()
+            print('{:0.3f}s'.format(stop_time - start_time))
         return wrapper
     return decorator
 
@@ -29,7 +32,7 @@ def spinner_task():
     stopped = False
     while started:
         print(next(cursor), end='', flush=True)
-        time.sleep(0.1)
+        sleep(0.1)
         print('\r', end='', flush=True)
 
     stopped = True
