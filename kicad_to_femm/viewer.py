@@ -84,6 +84,9 @@ class Mouse:
 
 
 class Window(pyglet.window.Window):
+    MAX_V_SIZE = 1e6
+    MIN_V_SIZE = 1e-6
+
     def __init__(self, mirror_y=False):
         config = Config(double_buffer=True, depth_size=0, sample_buffers=1, samples=8)
         platform = pyglet.window.get_platform()
@@ -96,21 +99,18 @@ class Window(pyglet.window.Window):
 
         self.mirror_y = mirror_y
         self.polygon_groups = []
-        self.bounds = box(0, 0, 1, 1)
+        self.bounds = box(-1, -1, 1, 1)
 
-        # Viewport
-        self.v_size = 1
+        # Viewport height and center
+        self.v_size = 2
         self.h_origin = 0
         self.v_origin = 0
-
-        # Update flags
-        self.resize_flag = False
-        self.draw_flag = False
 
         # Mouse position label
         self.mouse_label = pyglet.text.Label('', font_size=18, x=10, y=10,
                                              anchor_x='left', anchor_y='baseline',
                                              color=(0, 0, 0, 160))
+
         # Current mouse position
         self.mouse = Mouse(self.width/2, self.height/2)
 
@@ -165,7 +165,6 @@ class Window(pyglet.window.Window):
 
     def show(self):
         self.home()
-        pyglet.clock.schedule_interval(self.update, 1 / 60)
         pyglet.app.run()
 
     def home(self):
@@ -183,20 +182,10 @@ class Window(pyglet.window.Window):
         self.v_size = (1 + margin * 2) * self.height / scale
 
         # Viewport origin
-        self.h_origin = ((x_min + x_max) - ((1 + margin * 2) * self.width / scale)) / 2
-        self.v_origin = ((y_min + y_max) - ((1 + margin * 2) * self.height / scale)) / 2
+        self.h_origin = (x_min + x_max) / 2
+        self.v_origin = (y_min + y_max) / 2
 
-        self.resize_flag = True
-
-    def update(self, realtime_dt):
-        if self.resize_flag:
-            self.resize_flag = False
-            self.on_resize(self.width, self.height)
-        if self.draw_flag:
-            self.draw_flag = False
-            self.on_draw()
-
-    def on_draw(self):
+    def on_draw(self, realtime_dt=None):
         self.clear()
 
         # Adjust viewport for the polygon
@@ -204,11 +193,11 @@ class Window(pyglet.window.Window):
         glLoadIdentity()
         h_size = self.v_size * self.width / self.height
         if self.mirror_y:
-            gluOrtho2D(self.h_origin, self.h_origin + h_size,
-                       self.v_origin + self.v_size, self.v_origin)
+            gluOrtho2D(self.h_origin - h_size / 2, self.h_origin + h_size / 2,
+                       self.v_origin + self.v_size / 2, self.v_origin - self.v_size / 2)
         else:
-            gluOrtho2D(self.h_origin, self.h_origin + h_size,
-                       self.v_origin, self.v_origin + self.v_size)
+            gluOrtho2D(self.h_origin - h_size / 2, self.h_origin + h_size / 2,
+                       self.v_origin - self.v_size / 2, self.v_origin + self.v_size / 2)
         glMatrixMode(GL_MODELVIEW)
 
         # Draw polygons
@@ -238,11 +227,11 @@ class Window(pyglet.window.Window):
         glMatrixMode(GL_MODELVIEW)
 
         # Draw text labels
-        x_coord = self.h_origin + self.mouse.x / self.height * self.v_size
+        x_coord = self.h_origin + (self.mouse.x - self.width / 2) / self.height * self.v_size
         if self.mirror_y:
-            y_coord = self.v_origin + (1 - self.mouse.y / self.height) * self.v_size
+            y_coord = self.v_origin + (self.height / 2 - self.mouse.y) / self.height * self.v_size
         else:
-            y_coord = self.v_origin + self.mouse.y / self.height * self.v_size
+            y_coord = self.v_origin + (self.mouse.y - self.height / 2) / self.height * self.v_size
         self.mouse_label.text = 'X {:.3f}  Y {:.3f}'.format(x_coord, y_coord)
         self.mouse_label.draw()
 
@@ -254,28 +243,31 @@ class Window(pyglet.window.Window):
             self.help_label.draw()
 
     def on_resize(self, width, height):
-        self.draw_flag = True
+        pyglet.clock.unschedule(self.on_draw)
+        pyglet.clock.schedule_once(self.on_draw, 1 / 60)
         return pyglet.event.EVENT_HANDLED
 
     def zoom(self, levels):
         """ Zoom in or out by levels. """
         # Determine what is under the mouse
-        mx = self.h_origin + self.mouse.x / self.height * self.v_size
+        mx = self.h_origin + (self.mouse.x - self.width / 2) / self.height * self.v_size
         if self.mirror_y:
-            my = self.v_origin + (1 - self.mouse.y / self.height) * self.v_size
+            my = self.v_origin + (self.height / 2 - self.mouse.y) / self.height * self.v_size
         else:
-            my = self.v_origin + self.mouse.y / self.height * self.v_size
+            my = self.v_origin + (self.mouse.y - self.height / 2) / self.height * self.v_size
         # Scale the vertical size
         self.v_size *= 1.25 ** -levels
+        self.v_size = max(min(self.v_size, self.MAX_V_SIZE), self.MIN_V_SIZE)
 
         # Adjust the origin to return what was under the mouse
-        self.h_origin = mx - self.mouse.x / self.height * self.v_size
+        self.h_origin = mx - (self.mouse.x - self.width / 2) / self.height * self.v_size
         if self.mirror_y:
-            self.v_origin = my - (1 - self.mouse.y / self.height) * self.v_size
+            self.v_origin = my - (self.height / 2 - self.mouse.y) / self.height * self.v_size
         else:
-            self.v_origin = my - self.mouse.y / self.height * self.v_size
+            self.v_origin = my - (self.mouse.y - self.height / 2) / self.height * self.v_size
 
-        self.resize_flag = True
+        pyglet.clock.unschedule(self.on_draw)
+        pyglet.clock.schedule_once(self.on_draw, 1 / 60)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         self.zoom(scroll_y)
