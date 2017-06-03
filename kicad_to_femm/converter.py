@@ -5,6 +5,7 @@ Generates polygons from all of the geometry contained in the kicad-pcb file.
 
 Outputs only the geometry that is electrically connected to the pads that match the conductor specification.
 """
+import collections
 from math import atan2, pi, degrees
 from itertools import chain
 
@@ -16,6 +17,11 @@ from kicad_to_femm import viewer
 import kicad_to_femm.fec_file as fec
 from kicad_to_femm.layout import Layout
 from kicad_to_femm.spinner import spinner
+
+
+def make_iter(x):
+    """ Helper to handle returns from shapely operations that may or may not result in an iterable. """
+    return x if isinstance(x, collections.Iterable) else (x,)
 
 
 def distance(p1, p2):
@@ -35,6 +41,9 @@ def vertex_angle(p1, p2, p3):
 def calc_mesh_size(p1, p2, p3, p4):
     """ Determine the optimal mesh size for a segment given the segment points and the points before and after.
         A mesh size of -1 is 'auto'.
+
+        This is needed because the auto setting generates unnecessarily dense meshes for lines approximating curves,
+        since it doesn't appear to account for segment angles.
     """
     size = -1
     segment_length = distance(p2, p3)
@@ -45,14 +54,7 @@ def calc_mesh_size(p1, p2, p3, p4):
 
 
 class PadBase:
-    DEFAULT_SMD_PAD_AREA_RATIO = 0.5
-
     def __init__(self, kicad_item):
-        # SMD pad conductor are ratio
-        # This is the ratio of the area of the SMD pad copper to the SMD pad conductor.
-        # Reasonable values are typically around 0.4 to 0.6
-        self._smd_pad_area_ratio = PadBase.DEFAULT_SMD_PAD_AREA_RATIO
-
         self.kicad_item = kicad_item
 
         # Fill in missing values if the source item is a via type
@@ -61,23 +63,29 @@ class PadBase:
             self.kicad_item.type = 'thru_hole'
 
         self._center = None
-        self._hole_center = None
-        self._raw_copper_polygon = None # Before simplification
         self._copper_polygon = None
+
+        self._conductor_spec = None
         self._conductor_polygon = None
 
         # Set of blocks the pad is a part of
         self.blocks = set()
 
     @property
-    def smd_pad_area_ratio(self):
-        return self._smd_pad_area_ratio
+    def conductor_spec(self):
+        return self._conductor_spec
 
-    @smd_pad_area_ratio.setter
-    def smd_pad_area_ratio(self, value):
-        if not (0.0 < value < 1.0):
-            raise ValueError('smd_pad_area_ratio must be > 0.0 and < 1.0')
-        self._smd_pad_area_ratio= value
+    @conductor_spec.setter
+    def conductor_spec(self, spec):
+        if not self._conductor_spec:
+            self._conductor_spec = spec
+        else:
+            raise ValueError('Pad conductor already set to <{}>. Cannot set to <{}>'.format(
+                    self._conductor_spec.name, spec.name))
+
+    @conductor_spec.deleter
+    def conductor_spec(self):
+        self._conductor_spec = None
 
     @property
     def center(self):
@@ -97,30 +105,7 @@ class PadBase:
         return self._center
 
     @property
-    def hole_center(self):
-        """ Pad hole center point. """
-        if not self._hole_center:
-            if self.kicad_item.type == 'smd':
-                self._hole_center = self.center
-
-                # Apply Pad offset if it exists
-                try:
-                    offset = self.kicad_item.drill.offset
-                    self._hole_center = translate(self._hole_center, offset.x, offset.y)
-                except (AttributeError, IndexError):
-                    pass
-
-                # Rotate pad to it's final orientation
-                self._hole_center = rotate(self._hole_center, -self.kicad_item.at.rot, self.center)
-
-            elif self.kicad_item.type == 'thru_hole':
-                self._hole_center = self.center
-
-        return self._hole_center
-
-    @property
     def conductor_polygon(self):
-        """ Conductor polygon. """
         if not self._conductor_polygon:
             if self.kicad_item.type == 'thru_hole':
 
@@ -143,14 +128,14 @@ class PadBase:
             elif self.kicad_item.type == 'smd':
                 # Start with the copper polygon.
                 initial_area = self.copper_polygon.area
-                goal_area = self.smd_pad_area_ratio * initial_area
+                goal_area = self.conductor_spec.smd_pad_area_ratio * initial_area
 
                 # First estimate of the margin needed
                 margin = -(initial_area - goal_area) / self.copper_polygon.length
 
                 # Iteratively reduce area error until 10 iterations have passed, or error is < 1%
                 for i in range(10):
-                    polygon = self.copper_polygon.buffer(margin, join_style=JOIN_STYLE.mitre)
+                    polygon = self.copper_polygon.buffer(margin, join_style=JOIN_STYLE.mitre, mitre_limit=10)
                     if abs(1 - polygon.area / goal_area) < 0.001:
                         break
                     margin -= (polygon.area - goal_area) / polygon.length
@@ -162,9 +147,8 @@ class PadBase:
         return self._conductor_polygon
 
     @property
-    def raw_copper_polygon(self):
-        """ Copper polygon before simplifying. """
-        if not self._raw_copper_polygon:
+    def copper_polygon(self):
+        if not self._copper_polygon:
             if self.kicad_item.shape == 'circle':
                 pad_poly = self.center.buffer(self.kicad_item.size.x / 2)
 
@@ -201,83 +185,45 @@ class PadBase:
                 pass
 
             # Rotate pad to it's final orientation
-            self._raw_copper_polygon = rotate(pad_poly, -self.kicad_item.at.rot, self.center)
-
-        return self._raw_copper_polygon
-
-    @raw_copper_polygon.setter
-    def raw_copper_polygon(self, polygon):
-        self._raw_copper_polygon = polygon
-
-        # Clear any cached polygons that may depend on the raw_copper_polygon
-        self._conductor_polygon = None
-        self._copper_polygon = None
-
-    @property
-    def copper_polygon(self):
-        """ Copper polygon after simplifying. """
-        if not self._copper_polygon:
-            self._copper_polygon = self.raw_copper_polygon.simplify(0.01)
+            self._copper_polygon = rotate(pad_poly, -self.kicad_item.at.rot, self.center).simplify(0.01)
 
         return self._copper_polygon
 
-    def segments(self, layer):
+    @copper_polygon.setter
+    def copper_polygon(self, polygon):
+        self._copper_polygon = polygon
+
+    def conductor_segments(self, layer):
         """ Return a list of fec segments that form the conductor polygon.
             Conductors and boundaries can be filled in for the returned segments.
 
             The provided layer is used to place the polygon in the fec layout space before returning segments.
         """
         segment_list = []
-        placed_polygon = Layout.place(self.conductor_polygon, layer)
-        for ring in (placed_polygon.exterior, *placed_polygon.interiors):
-            points = [fec.Point(*coord) for coord in ring.coords[:-1]]
-            l = len(points)
+        for linestring in make_iter(Layout.place(self.conductor_polygon.boundary, layer)):
+            points = [fec.Point(*coord) for coord in linestring.coords]
+            l = len(points) - 1
             for i in range(l):
                 mesh_size = calc_mesh_size(points[(i - 1) % l], points[i], points[(i + 1) % l], points[(i + 2) % l])
-                segment = fec.Segment((points[i], points[(i + 1) % l]), mesh_size=mesh_size)
+                segment = fec.Segment((points[i], points[i + 1]), mesh_size=mesh_size)
                 segment_list.append(segment)
         return segment_list
 
 
 class Pad(PadBase):
-    def __init__(self, kicad_item):
-        # kicad_item can have the keyword 'via' or 'pad'
-        super().__init__(kicad_item)
-        self._conductor = None
-
-    @property
-    def conductor(self):
-        return self._conductor
-
-    @conductor.setter
-    def conductor(self, value):
-        if not self._conductor:
-            self._conductor = value
-        else:
-            raise ValueError('Pad conductor already set to <{}>. Cannot set to <{}>'.format(
-                    self._conductor.name, value.name))
-
-    @conductor.deleter
-    def conductor(self):
-        self._conductor = None
-
     def to_fec(self, fec_file):
+        # Segments only (labels are handled by the CopperLayer class)
         for layer in Layout.layers:
             if self.kicad_item.has_layer(layer):
-                for segment in self.segments(layer):
-                    segment.conductor = self.conductor
+                for segment in self.conductor_segments(layer):
+                    segment.conductor = self.conductor_spec.conductor
                     fec_file.add_segment(segment)
-                hole = Layout.place(self.hole_center, layer)
-                fec_file.holes.append(fec.Hole(hole.x, hole.y))
 
 
 class Via(PadBase):
     index = 0  # Index used to give unique names to via segment boundary conditions
 
-    def __init__(self, kicad_item):
-        super().__init__(kicad_item)
-
-    def unrolled_via_segments(self, rolled_segments):
+    def unrolled_segments(self, rolled_segments):
         """ Return fec segments that form the unrolled via.
             Segments are returned in separate lists based on which boundaries they will be a part of.
             Mesh size is set to match the corresponding segment in the rolled via.
@@ -327,16 +273,14 @@ class Via(PadBase):
         return top_segments, bottom_segments, side_segments
 
     def to_fec(self, fec_file):
-        # Get the rolled segments
+        # Get the rolled drill segments
         layer_segments = []
         for layer in Layout.layers:
             if self.kicad_item.has_layer(layer):
-                layer_segments.append(self.segments(layer))
-                hole = Layout.place(self.center, layer)
-                fec_file.holes.append(fec.Hole(hole.x, hole.y))
+                layer_segments.append(self.conductor_segments(layer))
 
         # Get the unrolled segments
-        top_segments, bottom_segments, side_segments = self.unrolled_via_segments(layer_segments[0])
+        top_segments, bottom_segments, side_segments = self.unrolled_segments(layer_segments[0])
 
         # Place the block label
         x = (top_segments[0].points[0].x + top_segments[-1].points[1].x) / 2
@@ -375,7 +319,7 @@ class Via(PadBase):
 
 class Block:
     def __init__(self, polygon, layer):
-        self.polygon = polygon.simplify(0.01)
+        self.polygon = polygon
         self.layer = layer
 
         # Sets of pads and vias intersecting the block
@@ -385,41 +329,67 @@ class Block:
     @property
     def segments(self):
         """ Return a list of fec segments that form the block polygon. """
+        # Remove pad and via conductor boundaries from the block boundary
+        conductor_boundary = unary_union([pad.conductor_polygon for pad in self.pads | self.vias]).boundary
+        boundary = self.polygon.boundary.difference(conductor_boundary)
+        placed_boundary = Layout.place(boundary, self.layer)
+
         segment_list = []
-        placed_polygon = Layout.place(self.polygon, self.layer)
-        for ring in (placed_polygon.exterior, *placed_polygon.interiors):
-            points = [fec.Point(*coord) for coord in ring.coords[:-1]]
-            l = len(points)
+        for linestring in make_iter(placed_boundary):
+            points = [fec.Point(*coord) for coord in linestring.coords]
+            l = len(points) - 1
             for i in range(l):
-                mesh_size = calc_mesh_size(points[(i - 1) % l], points[i], points[(i + 1) % l], points[(i + 2) % l])
-                segment = fec.Segment((points[i], points[(i + 1) % l]), mesh_size=mesh_size)
+                if linestring.is_ring:
+                    mesh_size = calc_mesh_size(points[(i - 1) % l], points[i], points[(i + 1) % l], points[(i + 2) % l])
+                else:
+                    try:
+                        mesh_size = calc_mesh_size(points[i - 1], points[i], points[i + 1], points[i + 2])
+                    except IndexError:
+                        # Can't find angles for end segments, use the default mesh sizing
+                        mesh_size = -1
+                segment = fec.Segment((points[i], points[i + 1]), mesh_size=mesh_size)
                 segment_list.append(segment)
         return segment_list
 
     def to_fec(self, fec_file):
-        # Segments
+        # Segments only (labels are handled by the CopperLayer class)
         for segment in self.segments:
             fec_file.add_segment(segment)
 
-        # Holes
-        for interior in self.polygon.interiors:
-            hole = Polygon(interior.coords[:-1]).representative_point()
-            hole = Layout.place(hole, self.layer)
-            fec_file.holes.append(fec.Hole(hole.x, hole.y))
 
-        # Block (remove intersecting pads from the block before placing the block label)
-        intersecting_pads = unary_union([pad.conductor_polygon for pad in self.pads | self.vias])
+class CopperLayer:
+    def __init__(self, layer):
+        self.layer = layer   # Name of the copper layer
+        self.blocks = set()  # Blocks are positive area
 
-        # If there were any pads with holes, the block will now be split into multiple blocks
-        polygons = self.polygon.difference(intersecting_pads)
-        try:
-            points = [polygon.representative_point() for polygon in polygons]
-        except TypeError:
-            points = [polygons.representative_point()]
+    def to_fec(self, fec_file):
+        """ Writes all holes and block labels. """
+        # Merge all blocks together
+        copper_polygons = unary_union([block.polygon for block in self.blocks])
 
-        for point in points:
-            point = Layout.place(point, self.layer)
+        # Cut the copper from a buffered bounding rectangle
+        bounding_box = box(*copper_polygons.bounds).buffer(1, join_style=JOIN_STYLE.mitre, mitre_limit=10)
+        hole_polygons = bounding_box.difference(copper_polygons)
+
+        # Generate hole labels from all polygons (except the outer bounding rectangle)
+        for polygon in make_iter(hole_polygons):
+            if polygon.bounds != bounding_box.bounds:
+                point = Layout.place(polygon.representative_point(), self.layer)
+                fec_file.holes.append(fec.Block(point.x, point.y))
+
+        # Cut out pad/via conductor holes (use block.pads, and block.vias)
+        conductors = unary_union([pad.conductor_polygon for block in self.blocks for pad in block.pads | block.vias])
+        copper_polygons = copper_polygons.difference(conductors)
+
+        # Generate copper block labels from all polygons
+        for polygon in make_iter(copper_polygons):
+            point = Layout.place(polygon.representative_point(), self.layer)
             fec_file.blocks.append(fec.Block(point.x, point.y))
+
+        # Label conductor holes
+        for polygon in conductors:
+            point = Layout.place(polygon.representative_point(), self.layer)
+            fec_file.holes.append(fec.Block(point.x, point.y))
 
 
 class Converter:
@@ -430,8 +400,10 @@ class Converter:
         self.board_thickness = board_thickness
 
         self.pads = []
+        self.no_conductor_pads = []
         self.vias = []
         self.blocks = []
+        self.copper_layers = {layer: CopperLayer(layer) for layer in self.layers}
 
     def show(self):
         """ Show all blocks, pads, and vias in a viewer window. """
@@ -480,6 +452,10 @@ class Converter:
         for block in self.blocks:
             block.to_fec(fec_file)
 
+        # Generate FEC data for all copper layers
+        for copper_layer in self.copper_layers.values():
+            copper_layer.to_fec(fec_file)
+
     def read_in(self, kicad_pcb):
         # Find all pads (including vias)
         self.find_pads(kicad_pcb)
@@ -490,22 +466,19 @@ class Converter:
         # Find vias (all through-hole pads with no conductor set)
         self.find_vias()
 
+        # Merge pads of the same conductor if they overlap
+        self.merge_overlapping_pads()
+
         # Find blocks (copper area made from zones, traces, pads, and vias)
         self.find_blocks(kicad_pcb)
-
-        # Remove pads that have no conductors assigned to them
-        self.remove_unconnected_pads()
 
         # Prune blocks that do not connect back to a conductor (pad)
         # Also removes any vias in the pruned blocks.
         self.prune_blocks()
 
-        # Merge overlapping SMD pads
-        self.merge_overlapping_pads()
-
     @spinner('Finding pads... ')
     def find_pads(self, kicad_pcb):
-        """ Find all pads matching the net, within the bounds (including vias). """
+        """ Find all pads within the bounds (including vias). """
         pads_and_vias = chain(*(module.pads for module in kicad_pcb.modules), kicad_pcb.vias)
         for kicad_pad in pads_and_vias:
             if any(kicad_pad.has_layer(layer) for layer in self.layers):
@@ -519,20 +492,51 @@ class Converter:
         for pad in self.pads:
             for conductor_spec in self.conductor_specs:
                 if conductor_spec.match(pad):
-                    pad.conductor = conductor_spec.conductor
-                    if conductor_spec.smd_pad_area_ratio:
-                        pad.smd_pad_area_ratio = conductor_spec.smd_pad_area_ratio
+                    pad.conductor_spec = conductor_spec
+                    conductor_spec.pads.add(pad)
 
     @spinner('Finding vias... ')
     def find_vias(self):
         """ Convert through-hole pads without a conductor to vias. """
-        remaining_pads = []
-        for pad in self.pads:
-            if (not pad.conductor) and pad.kicad_item.type == 'thru_hole':
+        all_pads = self.pads
+        self.pads = []
+        self.no_conductor_pads = []
+        for pad in all_pads:
+            if pad.conductor_spec:
+                self.pads.append(pad)
+            elif pad.kicad_item.type == 'thru_hole':
                 self.vias.append(Via(pad.kicad_item))
             else:
-                remaining_pads.append(pad)
-        self.pads = remaining_pads
+                self.no_conductor_pads.append(pad)
+
+    @spinner('Merging overlapping SMD pads... ')
+    def merge_overlapping_pads(self):
+        self.pads = set()
+        for spec in self.conductor_specs:
+            # Separate conductor_spec SMD pads and through hole pads
+            all_spec_pads = spec.pads
+            spec.pads = set()
+            smd_pads = []
+            for pad in all_spec_pads:
+                if pad.kicad_item.type == 'smd':
+                    smd_pads.append(pad)
+                else:
+                    spec.pads.add(pad)
+
+            for layer in self.layers:
+                # Merge overlapping pads with a union, then split into new pads.
+                layer_pads = []
+                for pad in smd_pads:
+                    if pad.kicad_item.has_layer(layer):
+                        layer_pads.append(pad)
+                for polygon in make_iter(unary_union([pad.copper_polygon for pad in layer_pads]).simplify(0.01)):
+                    # Use the kicad item from a similar pad (same layer, and type)
+                    new_pad = Pad(layer_pads[0].kicad_item)
+                    new_pad.copper_polygon = polygon
+                    new_pad.conductor_spec = spec
+                    spec.pads.add(new_pad)
+                self.pads |= spec.pads
+        self.pads = list(self.pads)
 
     @spinner('Finding blocks... ')
     def find_blocks(self, kicad_pcb):
@@ -554,32 +558,20 @@ class Converter:
                     base = LineString(segment.endpoints)
                     polygons.append(base.buffer(segment.width / 2))
 
-            # Merge, and then cut by the bounds, if given
-            polygons = unary_union(polygons)
+            # Merge, and then cut by the bounds, if given (simplify before adding pads, so that pads are added exactly
+            # This allows subtracting conductor pads out later if needed.
+            polygons = unary_union(polygons).simplify(0.01)
             if self.bounds:
                 polygons = self.bounds.intersection(polygons)
             polygons = [polygons]
 
             # Add pad/via polygons on the given layer
-            for pad in self.pads + self.vias:
+            for pad in self.pads + self.no_conductor_pads + self.vias:
                 if pad.kicad_item.has_layer(layer):
                     polygons.append(pad.copper_polygon)
             polygons = unary_union(polygons)
 
-            # Result may be a single polygon, or a list of polygons
-            try:
-                self.blocks.extend(Block(polygon, layer) for polygon in polygons)
-            except TypeError:
-                self.blocks.append(Block(polygons, layer))
-
-    @spinner('Removing unconnected pads... ')
-    def remove_unconnected_pads(self):
-        # Remove pads that have no conductors assigned to them
-        remaining_pads = []
-        for pad in self.pads:
-            if pad.conductor:
-                remaining_pads.append(pad)
-        self.pads = remaining_pads
+            self.blocks.extend(Block(polygon, layer) for polygon in make_iter(polygons))
 
     @spinner('Pruning blocks... ')
     def prune_blocks(self):
@@ -611,62 +603,28 @@ class Converter:
                         active_blocks.add(block)
                         unchecked_active_blocks.add(block)
 
-        # Get all vias from active blocks
+        # Get all vias from active blocks, also assign blocks to a 'copper_layer'
         active_vias = set()
         for block in active_blocks:
+            self.copper_layers[block.layer].blocks.add(block)
             active_vias |= block.vias
 
         # Replace the lists of vias and blocks with pruned lists
         self.vias = list(active_vias)
         self.blocks = list(active_blocks)
 
-    @spinner('Merging overlapping SMD pads... ')
-    def merge_overlapping_pads(self):
-        all_pads = set()
-        for block in self.blocks:
-            # Separate block SMD pads and through hole pads
-            all_block_pads = block.pads
-            block.pads = set()
-            smd_pads = []
-            for pad in all_block_pads:
-                if pad.kicad_item.type == 'smd':
-                    smd_pads.append(pad)
-                else:
-                    block.pads.add(pad)
-
-            # Process all SMD pads in the block, using a temporary list to store the pads that were not merged.
-            # For each pass, pads that do not intersect are copied while pads that do intersect are merged.
-            processed_smd_pads = []
-            for pad in smd_pads:
-                unchanged_smd_pads = []
-                for other_pad in processed_smd_pads:
-                    if pad.raw_copper_polygon.intersects(other_pad.raw_copper_polygon):
-                        # Pads intersect, check if they share a conductor.
-                        if pad.conductor is other_pad.conductor:
-                            pad.raw_copper_polygon = pad.raw_copper_polygon.union(other_pad.raw_copper_polygon)
-                        else:
-                            raise ValueError(('SMD pads at {} and {} overlap,'
-                                              ' but have different conductors {} and {}.').format(
-                                *pad.center.coords, *other_pad.center.coords,
-                                pad.conductor.name, other_pad.conductor.name)
-                            )
-                    else:
-                        unchanged_smd_pads.append(other_pad)
-                processed_smd_pads = unchanged_smd_pads + [pad]
-
-            # Store the processed SMD pads back to the block pads list
-            block.pads |= set(processed_smd_pads)
-
-            # Copy the block pads to the global pads list
-            all_pads |= block.pads
-        self.pads = list(all_pads)
-
 
 class ConductorSpec:
     """ Conductor Spec, can be assigned to one or more pads. """
     def __init__(self, spec):
         self.net_name = ''
-        self.smd_pad_area_ratio = None
+
+        # SMD pad conductor are ratio
+        # This is the ratio of the area of the SMD pad copper to the SMD pad conductor.
+        # Reasonable values are typically around 0.4 to 0.6
+        # If not set in the spec, the value here is taken as the default
+        self.smd_pad_area_ratio = 0.5
+
         self.modules = []
         self.regions = []
 
@@ -680,6 +638,8 @@ class ConductorSpec:
             elif field == 'net':
                 self.net_name = item
             elif field == 'pad_area':
+                if not (0.0 < item <= 1.0):
+                    raise ValueError('smd_pad_area_ratio must be > 0.0 and < 1.0')
                 self.smd_pad_area_ratio = item
             elif field == 'modules':
                 self.modules = item
@@ -698,6 +658,9 @@ class ConductorSpec:
 
         # Set the fec conductor for the spec
         self.conductor = fec.Conductor(name, conductor_type, value)
+
+        # Set of pads matching the conductor spec
+        self.pads = set()
 
     def match(self, pad):
         """ Returns true if the pad matches the conductor spec. """
