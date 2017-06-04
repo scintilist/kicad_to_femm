@@ -339,7 +339,7 @@ class Block:
             points = [fec.Point(*coord) for coord in linestring.coords]
             l = len(points) - 1
             for i in range(l):
-                if linestring.is_ring:
+                if points[0] == points[-1]:  # Replaces is_ring because is_ring is very slow.
                     mesh_size = calc_mesh_size(points[(i - 1) % l], points[i], points[(i + 1) % l], points[(i + 2) % l])
                 else:
                     try:
@@ -349,6 +349,7 @@ class Block:
                         mesh_size = -1
                 segment = fec.Segment((points[i], points[i + 1]), mesh_size=mesh_size)
                 segment_list.append(segment)
+
         return segment_list
 
     def to_fec(self, fec_file):
