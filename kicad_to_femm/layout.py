@@ -21,36 +21,54 @@ class Layout:
     via_row_x_max = 0
     via_row_height = 0
 
-    board_thickness = None
-    initialized = False
+    board_thickness = 0
+    config_initialized = False
+    bounds_initialized = False
 
     # Placement clearance between different layers / unrolled vias
-    clearance = 0.5
+    clearance = 0
+
+    # Copper and via block properties
+    copper_property = None
+    via_property = None
 
     @staticmethod
-    def __init__(layers=('F.Cu', 'B.Cu'), bounds=((0, 0, 0, 0), (0, 0, 0, 0)), board_thickness=None):
+    def set_config(layers, board_thickness, copper_property, via_property, clearance=0.5):
         # Unpack names and bounds for the top and bottom layers
         Layout.layers = layers
         try:
             Layout.top = layers[0]
-            try:
-                t_x_min, t_y_min, t_x_max, t_y_max = bounds[0]
-            except ValueError:
-                t_x_min, t_y_min, t_x_max, t_y_max = (0, 0, 0, 0)
         except IndexError:
             raise IndexError('Layout has not been given any layers.')
         try:
             Layout.bottom = layers[1]
-            try:
-                b_x_min, b_y_min, b_x_max, b_y_max = bounds[1]
-            except ValueError:
-                b_x_min, b_y_min, b_x_max, b_y_max = (0, 0, 0, 0)
         except IndexError:
             Layout.bottom = ''
-            b_x_min, b_y_min, b_x_max, b_y_max = (0, 0, 0, 0)
 
         # Set the board thickness
         Layout.board_thickness = board_thickness
+
+        # Copper and via block properties
+        Layout.copper_property = copper_property
+        Layout.via_property = via_property
+
+        # Clearance between placed elements
+        Layout.clearance = clearance
+
+        # Set config initialized flag
+        Layout.config_initialized = True
+
+    @staticmethod
+    def set_bounds(bounds=((0, 0, 0, 0), (0, 0, 0, 0))):
+        try:
+            t_x_min, t_y_min, t_x_max, t_y_max = bounds[0]
+        except ValueError:
+            t_x_min, t_y_min, t_x_max, t_y_max = (0, 0, 0, 0)
+
+        try:
+            b_x_min, b_y_min, b_x_max, b_y_max = bounds[1]
+        except ValueError:
+            b_x_min, b_y_min, b_x_max, b_y_max = (0, 0, 0, 0)
 
         # Bottom layer offset
         Layout.bottom_x_off = t_x_max + b_x_max + Layout.clearance
@@ -62,15 +80,15 @@ class Layout:
         Layout.via_row_x_max = t_x_max + b_x_max - b_x_min + Layout.clearance
         Layout.via_row_height = 0  # Tracks the tallest via in the current row, reset when starting a new row
 
-        # Set initialized flag
-        Layout.initialized = True
+        # Set the bounds initialized flag
+        Layout.bounds_initialized = True
 
     @staticmethod
     def place(polygon, layer):
         """ Place a polygon into the layout on the given layer.
             Returns the polygon transformed to it's layout coordinates.
         """
-        if not Layout.initialized:
+        if not Layout.config_initialized or not Layout.bounds_initialized:
             raise AttributeError('Layout has not been initialized.')
 
         if layer == Layout.top:
@@ -89,7 +107,7 @@ class Layout:
         """ Place a via polygon into the layout.
             Returns the polygon transformed to it's layout coordinates.
         """
-        if not Layout.initialized:
+        if not Layout.config_initialized or not Layout.bounds_initialized:
             raise AttributeError('Layout has not been initialized.')
 
         x_min, y_min, x_max, y_max = polygon.bounds

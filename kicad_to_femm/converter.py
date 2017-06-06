@@ -14,7 +14,7 @@ from shapely.ops import unary_union
 from shapely.affinity import rotate, translate
 
 from kicad_to_femm import viewer
-import kicad_to_femm.fec_file as fec
+from kicad_to_femm import fec
 from kicad_to_femm.layout import Layout
 from kicad_to_femm.spinner import spinner
 
@@ -193,7 +193,7 @@ class PadBase:
     def copper_polygon(self, polygon):
         self._copper_polygon = polygon
 
-    def conductor_segments(self, layer):
+    def generate_conductor_segments(self, layer):
         """ Return a list of fec segments that form the conductor polygon.
             Conductors and boundaries can be filled in for the returned segments.
 
@@ -211,19 +211,19 @@ class PadBase:
 
 
 class Pad(PadBase):
-    def to_fec(self, fec_file):
+    def generate_fec(self):
         # Segments only (labels are handled by the CopperLayer class)
         for layer in Layout.layers:
             if self.kicad_item.has_layer(layer):
-                for segment in self.conductor_segments(layer):
+                for segment in self.generate_conductor_segments(layer):
+                    assert segment in fec.Segment.instances
                     segment.conductor = self.conductor_spec.conductor
-                    fec_file.add_segment(segment)
 
 
 class Via(PadBase):
     index = 0  # Index used to give unique names to via segment boundary conditions
 
-    def unrolled_segments(self, rolled_segments):
+    def generate_unrolled_segments(self, rolled_segments):
         """ Return fec segments that form the unrolled via.
             Segments are returned in separate lists based on which boundaries they will be a part of.
             Mesh size is set to match the corresponding segment in the rolled via.
@@ -272,26 +272,25 @@ class Via(PadBase):
 
         return top_segments, bottom_segments, side_segments
 
-    def to_fec(self, fec_file):
+    def generate_fec(self):
         # Get the rolled drill segments
         layer_segments = []
         for layer in Layout.layers:
             if self.kicad_item.has_layer(layer):
-                layer_segments.append(self.conductor_segments(layer))
+                layer_segments.append(self.generate_conductor_segments(layer))
 
         # Get the unrolled segments
-        top_segments, bottom_segments, side_segments = self.unrolled_segments(layer_segments[0])
+        top_segments, bottom_segments, side_segments = self.generate_unrolled_segments(layer_segments[0])
 
         # Place the block label
         x = (top_segments[0].points[0].x + top_segments[-1].points[1].x) / 2
         y = (side_segments[0].points[0].y + side_segments[0].points[1].y) / 2
-        fec_file.blocks.append(fec.Block(x, y, 2))  # Via material index hard coded at 2, can change if needed
+        fec.Block(x, y, Layout.via_property)
 
         # Add side segments
         boundary = fec.Boundary('via_{}_vert'.format(Via.index), fec.Boundary.TYPE_PERIODIC)
         for segment in side_segments:
             segment.boundary = boundary
-            fec_file.add_segment(segment)
 
         # Add top and bottom segments
         for i in range(len(layer_segments[0])):
@@ -309,11 +308,6 @@ class Via(PadBase):
             bottom_rolled_seg.boundary = bottom_boundary
             bottom_unrolled_seg.boundary = bottom_boundary
 
-            fec_file.add_segment(top_rolled_seg)
-            fec_file.add_segment(top_unrolled_seg)
-            fec_file.add_segment(bottom_rolled_seg)
-            fec_file.add_segment(bottom_unrolled_seg)
-
         Via.index += 1
 
 
@@ -326,13 +320,9 @@ class Block:
         self.pads = set()
         self.vias = set()
 
-    @property
-    def segments(self):
+    def generate_segments(self):
         """ Return a list of fec segments that form the block polygon. """
-        # Remove pad and via conductor boundaries from the block boundary
-        conductor_boundary = unary_union([pad.conductor_polygon for pad in self.pads | self.vias]).boundary
-        boundary = self.polygon.boundary.difference(conductor_boundary)
-        placed_boundary = Layout.place(boundary, self.layer)
+        placed_boundary = Layout.place(self.polygon.boundary, self.layer)
 
         segment_list = []
         for linestring in make_iter(placed_boundary):
@@ -352,10 +342,9 @@ class Block:
 
         return segment_list
 
-    def to_fec(self, fec_file):
+    def generate_fec(self):
         # Segments only (labels are handled by the CopperLayer class)
-        for segment in self.segments:
-            fec_file.add_segment(segment)
+        self.generate_segments()
 
 
 class CopperLayer:
@@ -363,7 +352,7 @@ class CopperLayer:
         self.layer = layer   # Name of the copper layer
         self.blocks = set()  # Blocks are positive area
 
-    def to_fec(self, fec_file):
+    def generate_fec(self):
         """ Writes all holes and block labels. """
         # Merge all blocks together
         copper_polygons = unary_union([block.polygon for block in self.blocks])
@@ -372,33 +361,36 @@ class CopperLayer:
         bounding_box = box(*copper_polygons.bounds).buffer(1, join_style=JOIN_STYLE.mitre, mitre_limit=10)
         hole_polygons = bounding_box.difference(copper_polygons)
 
-        # Generate hole labels from all polygons (except the outer bounding rectangle)
+        # Generate hole labels from all inverted hole polygons (except the outer bounding rectangle)
         for polygon in make_iter(hole_polygons):
             if polygon.bounds != bounding_box.bounds:
                 point = Layout.place(polygon.representative_point(), self.layer)
-                fec_file.holes.append(fec.Block(point.x, point.y))
+                fec.Hole(point.x, point.y)
 
         # Cut out pad/via conductor holes (use block.pads, and block.vias)
         conductors = unary_union([pad.conductor_polygon for block in self.blocks for pad in block.pads | block.vias])
         copper_polygons = copper_polygons.difference(conductors)
 
+        # Buffer by a small negative amount to prevent labels being placed in small slivers that may be later removed
+        # by geometry post-processing steps
+        copper_polygons = copper_polygons .buffer(-1e-3, join_style=JOIN_STYLE.mitre, mitre_limit=10)
+
         # Generate copper block labels from all polygons
         for polygon in make_iter(copper_polygons):
             point = Layout.place(polygon.representative_point(), self.layer)
-            fec_file.blocks.append(fec.Block(point.x, point.y))
+            fec.Block(point.x, point.y, Layout.copper_property)
 
         # Label conductor holes
         for polygon in conductors:
             point = Layout.place(polygon.representative_point(), self.layer)
-            fec_file.holes.append(fec.Block(point.x, point.y))
+            fec.Hole(point.x, point.y)
 
 
 class Converter:
-    def __init__(self, conductor_specs, layers, bounds=None, board_thickness=None):
+    def __init__(self, conductor_specs, layers, bounds=None):
         self.conductor_specs = conductor_specs
         self.layers = layers
         self.bounds = box(*bounds) if bounds else None
-        self.board_thickness = board_thickness
 
         self.pads = []
         self.no_conductor_pads = []
@@ -429,35 +421,34 @@ class Converter:
 
         window.show()
 
-    @spinner('Writing FEC output... ')
-    def write_out(self, fec_file):
-        # Set up the layout
+    @spinner('Generating FEC output... ')
+    def generate_output(self):
+        # Set up the layout bounds
         layer_bounds = []
         for layer in self.layers:
             polygons = [block.polygon for block in self.blocks if block.layer == layer]
             layer_bounds.append(MultiPolygon(polygons).bounds)
-        Layout(self.layers, layer_bounds, self.board_thickness)
+        Layout.set_bounds(layer_bounds)
 
         # Generate FEC data for all pads
         for pad in self.pads:
-            pad.to_fec(fec_file)
+            pad.generate_fec()
 
         # Generate FEC data for all vias
-        # Sort by x-coord, then y so the via index roughly corresponds to board position
-        self.vias.sort(key=lambda via: via.center.x)
-        self.vias.sort(key=lambda via: via.center.y)
+        # Sort vias by position so the via index roughly corresponds to board position
+        self.vias.sort(key=lambda via: (via.center.y, via.center.x))
         for via in self.vias:
-            via.to_fec(fec_file)
+            via.generate_fec()
 
         # Generate FEC data for all blocks
         for block in self.blocks:
-            block.to_fec(fec_file)
+            block.generate_fec()
 
         # Generate FEC data for all copper layers
         for copper_layer in self.copper_layers.values():
-            copper_layer.to_fec(fec_file)
+            copper_layer.generate_fec()
 
-    def read_in(self, kicad_pcb):
+    def parse_input(self, kicad_pcb):
         # Find all pads (including vias)
         self.find_pads(kicad_pcb)
 

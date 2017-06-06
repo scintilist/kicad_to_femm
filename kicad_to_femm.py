@@ -11,7 +11,8 @@ from os.path import split, splitext, abspath
 
 from kicad_to_femm.kicad_pcb import KiCadPcb
 from kicad_to_femm.converter import Converter, ConductorSpec
-import kicad_to_femm.fec_file as fec
+from kicad_to_femm.layout import Layout
+from kicad_to_femm import fec
 
 
 if __name__ == '__main__':
@@ -93,24 +94,25 @@ if __name__ == '__main__':
     with open(args.conductor_file, 'r') as f:
         conductor_specs = [ConductorSpec(spec) for spec in literal_eval(f.read())]
 
-    # Open an FEC file instance
-    fec_file = fec.File(args.out_file, thickness=args.thickness/1000, frequency=args.frequency)
-
-    # Add the block properties
+    # Create the block properties
     copper_conductivity = 5.8e7
-    fec_file.block_properties.append(fec.BlockProperty('Copper', copper_conductivity))
+    copper_prop = fec.BlockProperty('Copper', copper_conductivity)
+
     # Since the simulation is done with a single material thickness,
     # scaling via wall thickness is done by scaling copper conductivity.
     via_conductivity = copper_conductivity * args.via_thickness / args.thickness
-    fec_file.block_properties.append(fec.BlockProperty('Via', via_conductivity))
+    via_prop = fec.BlockProperty('Via', via_conductivity)
+
+    # Set up the layout configuration
+    Layout.set_config(args.layers, args.board_thickness, copper_prop, via_prop)
 
     # Convert the kicad_pcb file to fec
-    converter = Converter(conductor_specs, args.layers, args.bounds, args.board_thickness)
-    converter.read_in(kicad_pcb)
-    converter.write_out(fec_file)
+    converter = Converter(conductor_specs, args.layers, args.bounds)
+    converter.parse_input(kicad_pcb)
+    converter.generate_output()
 
     # Write the output FEC file
-    fec_file.write_out()
+    fec.write_out(args.out_file, thickness=args.thickness/1000, frequency=args.frequency)
     print("Wrote output file '{}'.".format(abspath(args.out_file)))
 
     # Show the generated output polygons
