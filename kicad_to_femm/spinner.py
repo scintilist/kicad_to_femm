@@ -11,44 +11,44 @@ def spinner(text):
     def decorator(function):
         def wrapper(*args, **kwargs):
             print(text)
-            start()
+            _start()
             start_time = perf_counter()
             function(*args, **kwargs)
             stop_time = perf_counter()
-            stop()
+            _stop()
             print('{:0.3f}s'.format(stop_time - start_time))
         return wrapper
     return decorator
 
 # Synchronization flags
-started = False  # set by the task runner
-stopped = True   # set by the task
+_started = False  # set by the task runner
+_stopped = True   # set by the task
 
 cursor = cycle('|/-\\')
 
 
-def spinner_task():
-    global started, stopped
-    stopped = False
-    while started:
+def _spinner_task():
+    global _started, _stopped
+    _stopped = False
+    while _started:
         print(next(cursor), end='', flush=True)
         sleep(0.1)
         print('\r', end='', flush=True)
 
-    stopped = True
+    _stopped = True
 
 
-def start():
-    global started, stopped
-    started = False
-    while not stopped:
+def _start():
+    global _started, _stopped
+    _started = False
+    while not _stopped:
         pass
-    started = True
-    threading.Thread(target=spinner_task, daemon=True).start()
+    _started = True
+    threading.Thread(target=_spinner_task, daemon=True).start()
 
 
-def stop():
-    global started, stopped
-    started = False
-    while not stopped:
+def _stop():
+    global _started, _stopped
+    _started = False
+    while not _stopped:
         pass
