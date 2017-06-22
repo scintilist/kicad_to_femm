@@ -62,12 +62,12 @@ class Layout:
     def set_bounds(bounds=((0, 0, 0, 0), (0, 0, 0, 0))):
         try:
             t_x_min, t_y_min, t_x_max, t_y_max = bounds[0]
-        except ValueError:
+        except (IndexError, ValueError):
             t_x_min, t_y_min, t_x_max, t_y_max = (0, 0, 0, 0)
 
         try:
             b_x_min, b_y_min, b_x_max, b_y_max = bounds[1]
-        except ValueError:
+        except (IndexError, ValueError):
             b_x_min, b_y_min, b_x_max, b_y_max = (0, 0, 0, 0)
 
         # Bottom layer offset
