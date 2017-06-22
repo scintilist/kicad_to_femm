@@ -1,14 +1,23 @@
 """
 Simple OpenGL 2d viewer for groups of shapely polygons
 """
+import sys
 from itertools import chain
 
-import pyglet
-from pyglet.window import key
-from pyglet.gl import *
+try:
+    import pyglet
+    from pyglet.window import key
+    from pyglet.gl import *
+except ImportError:
+    print('Error Importing "pyglet". Option -s will not work.', file=sys.stderr)
+    raise
 
-from OpenGL.GLU import *
-from OpenGL.GL import *
+try:
+    from OpenGL.GLU import *
+    from OpenGL.GL import *
+except ImportError:
+    print('Error importing "PyOpenGL". Option -s will not work.', file=sys.stderr)
+    raise
 
 from shapely.geometry import MultiPolygon, box
 
@@ -88,11 +97,23 @@ class Window(pyglet.window.Window):
     MIN_V_SIZE = 1e-6
 
     def __init__(self, mirror_y=False):
-        config = Config(double_buffer=True, depth_size=0, sample_buffers=1, samples=8)
         platform = pyglet.window.get_platform()
         display = platform.get_default_display()
         screen = display.get_default_screen()
-        super().__init__(round(screen.width * 0.75), round(screen.height * 0.75), config=config, resizable=True)
+        # Try configurations with as many samples as possible until it works
+        samples = 16
+        while True:
+            try:
+                config = Config(double_buffer=True, depth_size=0, sample_buffers=1, samples=samples)
+                super().__init__(round(screen.width * 0.75), round(screen.height * 0.75), config=config, resizable=True)
+                break
+            except pyglet.window.NoSuchConfigException:
+                samples //= 2
+                # Give up trying to set the config if samples is less than 2
+                if samples < 2:
+                    super().__init__(round(screen.width * 0.75), round(screen.height * 0.75), resizable=True)
+                    break
+
         glClearColor(0.8, 0.8, 0.8, 1.0)
         glEnable(GL_BLEND)  # Enable transparency / alpha blending
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -124,8 +145,8 @@ class Window(pyglet.window.Window):
             '\tP         \t toggle points\n'
             '\tH, ?, F1\t toggle help\n'
             '\n'
-            'Zoom with mouse scroll or + and - keys\n'
-            'Pan with middle mouse drag or arrow keys'
+            'Zoom with mouse scroll or + / - keys\n'
+            'Pan with mouse drag or arrow keys'
         )
         help_doc.set_style(0, len(help_doc.text), dict(font_size=14, color=(0, 0, 0, 160)))
 
@@ -279,11 +300,10 @@ class Window(pyglet.window.Window):
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
         self.mouse.x = x
         self.mouse.y = y
-        if buttons & pyglet.window.mouse.MIDDLE:
-            self.h_origin -= dx * self.v_size / self.height
-            if self.mirror_y:
-                dy = -dy
-            self.v_origin -= dy * self.v_size / self.height
+        self.h_origin -= dx * self.v_size / self.height
+        if self.mirror_y:
+            dy = -dy
+        self.v_origin -= dy * self.v_size / self.height
 
     def on_key_release(self, symbol, modifiers):
         KeyRepeat(symbol).stop()

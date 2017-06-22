@@ -5,6 +5,7 @@ Generates polygons from all of the geometry contained in the kicad-pcb file.
 
 Outputs only the geometry that is electrically connected to the pads that match the conductor specification.
 """
+import sys
 import collections
 from math import atan2, pi, degrees
 from itertools import chain
@@ -13,7 +14,10 @@ from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString,
 from shapely.ops import unary_union
 from shapely.affinity import rotate, translate
 
-from kicad_to_femm import viewer
+try:
+    from kicad_to_femm import viewer
+except ImportError:
+    viewer = None
 from kicad_to_femm import fec
 from kicad_to_femm.layout import Layout
 from kicad_to_femm.spinner import spinner
@@ -400,6 +404,10 @@ class Converter:
 
     def show(self):
         """ Show all blocks, pads, and vias in a viewer window. """
+        if not viewer:
+            print('Viewer was not loaded, cannot show output. (check for import errors).', file=sys.stderr)
+            return
+
         window = viewer.Window(mirror_y=True)
 
         window.add_polygon_group([block.polygon for block in self.blocks if block.layer == self.layers[1]],
