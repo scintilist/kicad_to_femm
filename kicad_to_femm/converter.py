@@ -105,7 +105,8 @@ class PadBase:
                 new_name = spec.conductor.name
             except AttributeError:
                 pass
-            raise ValueError('Pad conductor already set to <{}>. Cannot set to <{}>'.format(current_name, new_name))
+            raise ValueError('Pad at ({}, {}) conductor already set to <{}>. Cannot set to <{}>'.format(
+                self.center.x, self.center.y, current_name, new_name))
 
     @conductor_spec.deleter
     def conductor_spec(self):
@@ -518,11 +519,8 @@ class Converter:
     @spinner('Assigning conductors... ')
     def assign_conductors(self):
         """ Assign conductors to pads based on the conductor specs. """
-        for pad in self.pads:
-            for conductor_spec in self.conductor_specs:
-                if conductor_spec.match(pad):
-                    pad.conductor_spec = conductor_spec
-                    conductor_spec.pads.add(pad)
+        for conductor_spec in self.conductor_specs:
+            conductor_spec.assign(self.pads)
 
     @spinner('Finding vias... ')
     def find_vias(self):
@@ -657,6 +655,7 @@ class ConductorSpec:
 
         self.modules = []
         self.regions = []
+        self.nearest = []
 
         name = ''
         value_str = '0V'
@@ -677,6 +676,8 @@ class ConductorSpec:
                 self.modules = item
             elif field == 'regions':
                 self.regions = item
+            elif field == 'nearest':
+                self.nearest = item
 
         # Parse the value
         value = float(value_str[:-1])
@@ -694,42 +695,69 @@ class ConductorSpec:
         # Set of pads matching the conductor spec
         self.pads = set()
 
-    def match(self, pad):
-        """ Returns true if the pad matches the conductor spec. """
-        # Does not match the specification if a net name was given and it doesn't match
-        if self.net_name and pad.kicad_item.net.name != self.net_name:
-            return False
+    def assign(self, pads):
+        """ Assign the conductor spec to all pads that match. """
 
-        # Does not match the specification if layers were given, and none are present in the pad
-        if self.layers:
-            match_layer = False
-            for layer in self.layers:
-                if pad.kicad_item.has_layer(layer):
-                    match_layer = True
-                    break
-            if not match_layer:
-                return False
+        filtered_pads = set()  # Set of pads that match the layer and net given in the spec
 
-        # Check against the regions
-        for region_spec in self.regions:
+        for pad in pads:
+            # Does not match the specification if a net name was given and it doesn't match
+            if self.net_name and pad.kicad_item.net.name != self.net_name:
+                continue
+
+            # Does not match the specification if layers were given, and none are present in the pad
+            if self.layers:
+                match_layer = False
+                for layer in self.layers:
+                    if pad.kicad_item.has_layer(layer):
+                        match_layer = True
+                        break
+                if not match_layer:
+                    continue
+
+            # Matches all filters, add to the set
+            filtered_pads.add(pad)
+
+            # Check against the regions
+            for region_spec in self.regions:
+                try:
+                    region_box = box(*region_spec)
+                except TypeError:
+                    raise TypeError('Region <{}> Invalid. Requires a tuple of (xmin, ymin, xmax, ymax)'.format(region_spec))
+
+                if region_box.contains(pad.center):
+                    pad.conductor_spec = self
+                    self.pads.add(pad)
+                    continue
+
+            # Check against the modules
             try:
-                region_box = box(*region_spec)
+                for module_spec in self.modules:
+                    if pad.kicad_item.parent.reference == module_spec[0]:
+                        # If the module spec length is 1, then there are no pads named and all are allowed
+                        if len(module_spec) == 1 or pad.kicad_item.number in module_spec[1:]:
+                            pad.conductor_spec = self
+                            self.pads.add(pad)
+                            continue
+            except AttributeError:
+                # Pad is not part of a module (does not have a reference)
+                pass
+
+        # Match nearest pads
+        filtered_pads = sorted(filtered_pads, key=lambda p: (p.center.y, p.center.x))
+        for point in self.nearest:
+            try:
+                center_point = Point(*point)
             except TypeError:
-                raise TypeError('Region <{}> Invalid. Requires a tuple of (xmin, ymin, xmax, ymax)'.format(region_spec))
+                raise TypeError('Nearest pad point <{}> Invalid. Requires an (x, y) tuple.'.format(point))
 
-            if region_box.contains(pad.center):
-                return True
+            nearest_pad = None
+            nearest_distance = float('inf')
+            for pad in filtered_pads:
+                pad_distance = distance(pad.center, center_point)
+                if pad_distance < nearest_distance:
+                    nearest_distance, nearest_pad = pad_distance, pad
 
-        # Check against the modules
-        try:
-            for module_spec in self.modules:
-                if pad.kicad_item.parent.reference == module_spec[0]:
-                    # If the module spec length is 1, then there are no pads named and all are allowed
-                    if len(module_spec) == 1 or pad.kicad_item.number in module_spec[1:]:
-                        return True
-        except AttributeError:
-            # Pad is not part of a module (does not have a reference)
-            pass
-
-        # Does not match any region or module spec
-        return False
+            if nearest_pad:
+                nearest_pad.conductor_spec = self
+                self.pads.add(nearest_pad)
