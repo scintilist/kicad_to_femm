@@ -354,10 +354,17 @@ class Pad(Item):
 
     def has_layer(self, match_layer):
         """ Returns true if the pad has the layer. """
-        match_layer_name, match_layer_type = match_layer.split('.')
+        try:
+            match_layer_name, match_layer_type = match_layer.split('.')
+        except ValueError:
+            match_layer_name, match_layer_type = match_layer, ''
 
         for layer in self.layers:
-            layer_name, layer_type = layer.split('.')
+            try:
+                layer_name, layer_type = layer.split('.')
+            except ValueError:
+                layer_name, layer_type = layer, ''
+
             if layer_type == match_layer_type:
                 if layer_name in ('*', match_layer_name):
                     return True

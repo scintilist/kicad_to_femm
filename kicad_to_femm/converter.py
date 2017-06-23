@@ -647,6 +647,7 @@ class ConductorSpec:
     """ Conductor Spec, can be assigned to one or more pads. """
     def __init__(self, spec):
         self.net_name = ''
+        self.layers = []
 
         # SMD pad conductor are ratio
         # This is the ratio of the area of the SMD pad copper to the SMD pad conductor.
@@ -666,6 +667,8 @@ class ConductorSpec:
                 value_str = item
             elif field == 'net':
                 self.net_name = item
+            elif field == 'layers':
+                self.layers = item
             elif field == 'pad_area':
                 if not (0.0 < item <= 1.0):
                     raise ValueError('smd_pad_area_ratio must be > 0.0 and <= 1.0')
@@ -696,6 +699,17 @@ class ConductorSpec:
         # Does not match the specification if a net name was given and it doesn't match
         if self.net_name and pad.kicad_item.net.name != self.net_name:
             return False
+
+        # Does not match the specification if layers were given, and none are present in the pad
+        if self.layers:
+            print('yes', self.layers)
+            match_layer = False
+            for layer in self.layers:
+                if pad.kicad_item.has_layer(layer):
+                    match_layer = True
+                    break
+            if not match_layer:
+                return False
 
         # Check against the regions
         for region_spec in self.regions:
