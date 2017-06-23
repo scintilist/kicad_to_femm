@@ -702,7 +702,6 @@ class ConductorSpec:
 
         # Does not match the specification if layers were given, and none are present in the pad
         if self.layers:
-            print('yes', self.layers)
             match_layer = False
             for layer in self.layers:
                 if pad.kicad_item.has_layer(layer):
@@ -713,7 +712,12 @@ class ConductorSpec:
 
         # Check against the regions
         for region_spec in self.regions:
-            if box(*region_spec).contains(pad.center):
+            try:
+                region_box = box(*region_spec)
+            except TypeError:
+                raise TypeError('Region <{}> Invalid. Requires a tuple of (xmin, ymin, xmax, ymax)'.format(region_spec))
+
+            if region_box.contains(pad.center):
                 return True
 
         # Check against the modules
