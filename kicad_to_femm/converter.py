@@ -620,6 +620,12 @@ class Converter:
                     block.vias.add(via)
                     via.blocks.add(block)
 
+                    # Check if the via annular ring is sufficient
+                    # This is needed to ensure that the via periodic boundaries can be correctly generated.
+                    if not via.conductor_polygon.buffer(0.001).within(block.polygon):
+                        raise ValueError('Via at ({}, {}) annular ring too small, < 0.001mm.'.format(
+                            via.center.x, via.center.y))
+
         # Traverse the connected blocks starting from each active block
         unchecked_active_blocks = active_blocks.copy()
         while unchecked_active_blocks:
